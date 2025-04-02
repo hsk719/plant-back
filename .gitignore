@@ -1,2 +1,6 @@
+<<<<<<< HEAD
 # Gradle 캐시 및 빌드 관련 파일 무시
 .gradle/
+=======
+.gradle/ 
+>>>>>>> fc512e6d5b8f9b71c0980486ecd242b304178b6b
