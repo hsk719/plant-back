@@ -1,0 +1,15 @@
+{
+    "configurations": [
+      {
+        "name": "Flask",
+        "type": "python",
+        "request": "launch",
+        "program": "${workspaceFolder}/app.py",
+        "env": {
+          "FLASK_APP": "app.py",
+          "FLASK_ENV": "development"
+        },
+        "console": "integratedTerminal"
+      }
+    ]
+  }
