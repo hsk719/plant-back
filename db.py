@@ -10,20 +10,23 @@ class Database:
         # env.json 파일 읽기
         with open('./env.json') as env_file:
             env_json = json.load(env_file)
-            
+
+             # 선택한 환경에 맞는 config 설정
             config = env_json[env]
             
-        if env == 'local':
-            host = config['host']
-        elif env == 'cloud':
-            connection_name = config.get("connection_name")
-            if not connection_name:
-                raise ValueError("Cloud SQL connection_name이 env.json에 없음")
-            host = f"/cloudsql/{connection_name}"
-        else:
-                raise ValueError("❌ 환경(env)은 'local' 또는 'cloud'여야 합니다.")
-            
-        print("✅ DB HOST:", host)  # 디버깅용 출력
+        if not config:
+            raise ValueError(f"❌ 환경(env) '{env}'는 유효하지 않습니다.")
+        
+        # 공통 키로 접근
+        host = config['host']
+        port = config.get('port', 5432)
+        user = config['user']
+        password = config['password']
+        dbname = config['dbname']
+        
+        print(f"✅ DB 연결: {host}")  # 디버깅용 출력
+           
+
         self.pool = pool.ThreadedConnectionPool(
             1,
             10,
@@ -77,28 +80,22 @@ class Database:
 
     @query_decorator
     def register_user(self, conn, email, hashed_password):
-        
-            
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM "app_user" WHERE email = %s', (email,))
         if cursor.fetchone():
-            return {"error": "Email already exists"}, 400
-        
-        try:
-            if self.check_email_exists(email):
-             return {'error': '이미 등록된 이메일입니다.'}, 409
+            return {"error": "Email already exists"}, 400  # ✅ 이걸로 충분
 
-            
-            # 비밀번호를 해시화된 값으로 삽입
-            sql = """INSERT INTO "app_user" (email, hashed_password, is_verified) VALUES (%s, %s, %s)"""  # is_verified 추가
-            cursor.execute(sql, (email, hashed_password, True))  # is_verified True로 설정 (즉시 인증된 상태)
+        try:
+        # 비밀번호를 해시화된 값으로 삽입
+            sql = """INSERT INTO "app_user" (email, password, is_verified) VALUES (%s, %s, %s)"""
+            cursor.execute(sql, (email, hashed_password, True))
             conn.commit()
-            
             return {"message": "User registered successfully"}, 201
+
         except Exception as e:
-            print(f"Error occurred: {e}")
-            return {"error": "Internal server error"}, 500
-        
+         print(f"Error occurred: {e}")
+        return {"error": "Internal server error"}, 500
+    
     @query_decorator
     def check_user_password(self, conn, email, entered_password):
         cursor = conn.cursor()
@@ -236,7 +233,88 @@ class Database:
         "author_email": row[3],
         "created_at": row[4].strftime('%Y-%m-%d %H:%M')
     } for row in rows]
+        
+    # 게시글 수정
+    @query_decorator
+    def update_post(self, conn, post_id, title, content):
+        cursor = conn.cursor()
+        
+        # SQL 쿼리 작성 (게시글 수정)
+        sql = """
+        UPDATE board_post
+        SET title = %s, content = %s
+        WHERE id = %s
+        RETURNING id;
+        """
+        
+        # 쿼리 실행
+        cursor.execute(sql, (title, content, post_id))
+        
+        # 수정된 게시글 ID 가져오기
+        result = cursor.fetchone()
+        
+        # 커밋 후 연결 종료
+        conn.commit()
+        cursor.close()
 
+        # 수정된 게시글이 있으면 수정 성공
+        if result:
+            return True
+        else:
+            return False
+        
+    # 게시글 삭제
+    @query_decorator
+    def delete_post(self, conn, post_id):
+        cursor = conn.cursor()
+
+        # 글이 존재하는지 확인
+        cursor.execute('SELECT * FROM board_post WHERE id = %s', (post_id,))
+        if not cursor.fetchone():
+            return False  # 삭제 실패 (글이 없음)
+
+        # 글 삭제
+        cursor.execute('DELETE FROM board_post WHERE id = %s', (post_id,))
+        conn.commit()
+        return True  # 삭제 성공
+    
+    @query_decorator
+    def update_comment(self, conn, comment_id, content):
+        cursor = conn.cursor()
+
+    # 댓글이 존재하는지 확인
+        cursor.execute('SELECT * FROM board_comment WHERE id = %s', (comment_id,))
+        comment = cursor.fetchone()
+
+        if not comment:
+            return False  # 댓글이 없으면 수정 실패
+
+        # 댓글 수정
+        cursor.execute('UPDATE board_comment SET content = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s',
+                   (content, comment_id))
+        conn.commit()
+
+        return True  # 수정 성공
+    
+    #댓글 삭제 함수 
+    @query_decorator
+    def delete_comment(self, conn, post_id, comment_id, author_email):
+        cursor = conn.cursor()
+
+        # 댓글이 존재하고 본인이 작성한 것인지 확인
+        cursor.execute('''
+            SELECT * FROM board_comment 
+            WHERE id = %s AND post_id = %s AND author_email = %s
+        ''', (comment_id, post_id, author_email))
+        comment = cursor.fetchone()
+
+        if not comment:
+            return False  # 댓글이 없거나 작성자가 아님
+
+        # 댓글 삭제
+        cursor.execute('DELETE FROM board_comment WHERE id = %s', (comment_id,))
+        conn.commit()
+        return True
     
     
 
