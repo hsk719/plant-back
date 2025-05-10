@@ -253,8 +253,9 @@ def delete_account():
         return jsonify({"message": "회원탈퇴가 완료되었습니다."}), 200
     else:
         return jsonify({"error": "회원탈퇴에 실패했습니다."}), 500
+    
 
-
+# 1365 api (검색하여 봉사참여정보목록조회)
 @app.route('/volunteer/meals', methods=['GET'])
 def get_volunteer_meals():
     # API 요청 파라미터 설정
@@ -264,7 +265,7 @@ def get_volunteer_meals():
     keyword = request.args.get('keyword')
     
     params = {
-        'ServiceKey': '여기에_실제_서비스키_입력',  # 필수! 공공데이터 포털에서 발급받은 서비스 키
+        'ServiceKey': '여기에_실제_서비스키_입력',  # 공공데이터 포털에서 발급받은 서비스 키
         'SchCateGu': 'prormSj',
         'keyword': keyword,
         'schSign1': '3000000',
@@ -328,7 +329,122 @@ def get_volunteer_meals():
         return jsonify({'error': f'XML parsing failed: {str(e)}'}), 500
     except Exception as e:
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+    
+    
+#1365 api(기간별 봉사 참여 정보 목록 조회)
+@app.route('/volunteer/period', methods=['GET'])
+def get_volunteer_period():
+    service_key = '여기에_서비스키_입력'
+    start_date = request.args.get('start_date')  # 예: 20250101
+    end_date = request.args.get('end_date')      # 예: 20250131
 
+    params = {
+        'ServiceKey': service_key,
+        'schprogrmBgnde': start_date,
+        'progrmEndde': end_date,
+        'numOfRows': 10,
+        'pageNo': 1
+    }
+
+    url = 'http://openapi.1365.go.kr/openapi/service/rest/VolunteerPartcptnService/getVltrPeriodSrvcList'
+
+    return call_volunteer_api(url, params)
+#1365 api(지역별 봉사 참여 정보 목록 조회)
+@app.route('/volunteer/area', methods=['GET'])
+def get_volunteer_area():
+    service_key = '여기에_서비스키_입력'
+    sido = request.args.get('sido')  # 예: 서울특별시
+    gugun = request.args.get('gugun')  # 예: 강남구
+
+    params = {
+        'ServiceKey': service_key,
+        'schSign1': sido,
+        'schSign2': gugun,
+        'numOfRows': 10,
+        'pageNo': 1
+    }
+
+    url = 'http://openapi.1365.go.kr/openapi/service/rest/VolunteerPartcptnService/getVltrAreaList'
+
+    return call_volunteer_api(url, params)
+
+# 1365 api(분야별 봉사 참여 정보 목록 조회)
+@app.route('/volunteer/category', methods=['GET'])
+def get_volunteer_category():
+    service_key = '여기에_서비스키_입력'
+    category = request.args.get('category')  # 예: 환경정화
+
+    params = {
+        'ServiceKey': service_key,
+        'schCateGu': category,
+        'numOfRows': 10,
+        'pageNo': 1
+    }
+
+    url = 'http://openapi.1365.go.kr/openapi/service/rest/VolunteerPartcptnService/getVltrCategoryList'
+
+    return call_volunteer_api(url, params)
+
+#1365 api (봉사 참여 정보 상세 조회)
+@app.route('/volunteer/detail', methods=['GET'])
+def get_volunteer_detail():
+    service_key = '여기에_서비스키_입력'
+    progrmRegistNo = request.args.get('progrmRegistNo')  # 고유 프로그램 ID
+
+    params = {
+        'ServiceKey': service_key,
+        'progrmRegistNo': progrmRegistNo
+    }
+
+    url = 'http://openapi.1365.go.kr/openapi/service/rest/VolunteerPartcptnService/getVltrPartcptnItem'
+
+    return call_volunteer_api(url, params)
+
+def call_volunteer_api(url, params):
+    try:
+        headers = {
+            'Accept': 'application/xml',
+            'Content-Type': 'application/xml'
+        }
+        response = requests.get(url, params=params, headers=headers)
+
+        print("Status Code:", response.status_code)
+        print("Response Content:", response.content.decode('utf-8'))
+
+        if response.status_code != 200:
+            return jsonify({
+                'error': f'API 요청 실패: {response.status_code}',
+                'content': response.content.decode('utf-8')
+            }), response.status_code
+
+        dict_data = xmltodict.parse(response.content)
+
+        if 'response' not in dict_data:
+            return jsonify({
+                'error': 'Invalid response format',
+                'content': dict_data
+            }), 500
+
+        result = {
+            'status': dict_data['response']['header']['resultMsg'],
+            'total_count': dict_data['response']['body'].get('totalCount', 0),
+            'items': []
+        }
+
+        if dict_data['response']['body'].get('items'):
+            items = dict_data['response']['body']['items'].get('item', [])
+            if isinstance(items, dict):
+                items = [items]
+            result['items'] = items
+
+        return jsonify(result, 200, {'Content-Type': 'application/json'})
+
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': f'Request failed: {str(e)}'}), 500
+    except xmltodict.expat.ExpatError as e:
+        return jsonify({'error': f'XML parsing failed: {str(e)}'}), 500
+    except Exception as e:
+        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
     
 # 게시판 관련 API
@@ -436,6 +552,7 @@ def delete_comment(post_id, comment_id):
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
 print("내용", flush=True)
+
     
 
 
