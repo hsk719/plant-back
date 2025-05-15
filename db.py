@@ -51,9 +51,14 @@ class Database:
                 if not conn:
                     print("[{}] Can't get db connection".format(datetime.now()))
                     return
+                
                 return func(self, conn, *args, **kwargs)
+            
             except Exception as e:
                 print('[{}] {}'.format(datetime.now(), e))
+                # 예외 발생 시에도 호출부에 적절한 튜플을 반환해야 함
+                return {"error": f"DB 처리 중 오류: {str(e)}"}, 500  #  반환문 추가
+            
             finally:
                 if conn:
                     self.pool.putconn(conn)
@@ -315,6 +320,85 @@ class Database:
         cursor.execute('DELETE FROM board_comment WHERE id = %s', (comment_id,))
         conn.commit()
         return True
+    
+    # 관리자 관련 DB 함수 모음 
+    @query_decorator
+    def get_admin(self, conn, email):
+        """이메일로 app_admin 테이블에서 관리자 1명을 조회"""
+        try:
+            cursor = conn.cursor()
+            sql = "SELECT * FROM app_admin WHERE email = %s;"
+            cursor.execute(sql, (email,))
+            row = cursor.fetchone()
+
+            if not row:
+                # 해당 이메일의 관리자가 없으면 에러 반환
+                return {"error": "관리자를 찾을 수 없습니다."}, 404
+            
+            # 튜플(row)을 딕셔너리로 변환
+            admin = {
+            "email": row[0],
+            "username": row[1],
+            "password": row[2]
+            }
+            return admin, 200
+
+        except Exception as e:
+            # 조회 중 예외 발생 시 에러 반환
+            return {"error": f"관리자 조회 오류: {str(e)}"}, 500
+        
+    #관리자 회원가입 함수
+    @query_decorator
+    def register_admin(self, conn, email, username, hashed_password):
+        """app_admin 테이블에 새로운 관리자 추가. 이메일 중복 시 409"""
+        try:
+            cursor = conn.cursor()
+            # 이메일 중복 검사
+            cursor.execute("SELECT * FROM app_admin WHERE email = %s", (email,))
+            existing_admin = cursor.fetchone()
+        
+            if existing_admin:
+                # 중복된 이메일이 있으면 등록 실패 반환
+                print(f"이메일 {email} 이미 존재: {existing_admin}")  #  디버깅 로그
+                return {"error": "이미 존재하는 이메일입니다."}, 409
+
+            # 중복 없으면 관리자 정보 DB에 삽입
+            sql = """
+            INSERT INTO app_admin (email, username, password)
+            VALUES (%s, %s, %s);
+            """
+            cursor.execute(sql, (email, username, hashed_password))
+            conn.commit()
+            return {"message": "관리자 등록 완료"}, 201
+
+        except Exception as e:
+            return {"error": f"관리자 등록 오류: {str(e)}"}, 500
+
+    #관리자 비밀번호 함수
+    @query_decorator
+    def check_admin_password(self, conn, email, entered_password):
+        """이메일과 비밀번호 확인 후 로그인"""
+        try:
+            cursor = conn.cursor()
+            sql = "SELECT * FROM app_admin WHERE email = %s;"
+            cursor.execute(sql, (email,))
+            row = cursor.fetchone()
+
+            if not row:
+                # 관리자 존재하지 않으면 404 반환
+                return {"error": "관리자를 찾을 수 없습니다."}, 404
+
+            stored_password_hash = row[1]
+            # 입력 비밀번호와 DB 해시값 비교
+            if not check_password_hash(stored_password_hash, entered_password):
+                return {"error": "비밀번호가 일치하지 않습니다."}, 401
+             # 비밀번호 일치 시 성공 반환
+            return {"message": "로그인 성공"}, 200
+
+        except Exception as e:
+            # 로그인 확인 중 예외 발생 시 에러 반환
+            return {"error": f"비밀번호 확인 오류: {str(e)}"}, 500 
+
     
     
 
