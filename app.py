@@ -15,7 +15,7 @@ import urllib.parse
 
 
 
-
+# 로깅 설정
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -23,8 +23,6 @@ logger.setLevel(logging.DEBUG)
 # Flask 애플리케이션 객체 생성
 app = Flask(__name__)
 CORS(app, origins="*")  # 모든 도메인에서 접근 가능하게 설정
-
-
 app.logger.setLevel(logging.DEBUG)
 
 # 비밀번호 해시화
@@ -91,7 +89,7 @@ def get_users():
     return jsonify(users)
 
 
-# 사용자 등록 라우트 (POST 요청)
+# 사용자(user) 등록 라우트 (POST 요청)
 @app.route('/login', methods=['POST'])
 def login():
     try:
@@ -136,7 +134,7 @@ def login():
 
     
     
-# 사용자 등록 (회원가입) 라우트
+# 사용자(user) 등록 (회원가입) 라우트
 @app.route('/register', methods=['POST'])
 def register():
     try:
@@ -183,9 +181,65 @@ def register():
         print(f"회원가입 중 오류 발생: {e}")
         return jsonify({'error': '회원가입 처리 중 오류가 발생했습니다.'}), 500
     
+# 관리자(admin) 회원가입
+@app.route('/admin/register', methods=['POST'])
+def admin_register():
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        username = data.get('username')
+        password = data.get('password')
 
+        if not email or not username or not password:
+            return jsonify({'error': '이메일, 사용자명, 비밀번호가 모두 필요합니다.'}), 400
+        
+        # 관리자 이메일 중복 여부 체크
+        existing_admin, status_code = db.get_admin(email)
+        if status_code == 200:
+            return jsonify({'error': '이미 등록된 이메일입니다.'}), 409
+        elif status_code != 404:
+            return jsonify(existing_admin), status_code  # 조회 실패 (예외 처리 등)
+
+        hashed_password = generate_password_hash(password, method='scrypt')
+        result, status_code = db.register_admin(email, username, hashed_password)
+        
+        print(f"등록 결과: {result}")  # 디버깅 로그
+        if status_code == 201:
+            return jsonify({"message": "관리자 등록 완료"}), 201
+        else:
+            return jsonify(result), status_code
+
+    except Exception as e:
+        print(f"관리자 회원가입 오류: {e}")
+        return jsonify({'error': '회원가입 처리 중 오류가 발생했습니다.'}), 500
     
- 
+# 관리자(admin) 로그인
+@app.route('/admin/login', methods=['POST'])
+def admin_login():
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        username = data.get('username')
+        password = data.get('password')
+
+        if not email or not username or not password:
+            return jsonify({'error': '이메일과 비밀번호가 필요합니다.'}), 400
+
+        admin, status_code = db.get_admin(email)
+        if status_code != 200:
+            return jsonify({'error': '관리자를 찾을 수 없습니다.'}), 401
+
+        if not check_password_hash(admin['password'], password):
+            return jsonify({'error': '비밀번호가 일치하지 않습니다.'}), 401
+
+        access_token = create_access_token(identity=email)
+        return jsonify({'access_token': access_token}), 200
+
+    except Exception as e:
+        print(f"관리자 로그인 오류: {e}")
+        return jsonify({'error': '로그인 처리 중 오류가 발생했습니다.'}), 500
+
+
     
     
     # 이메일로 사용자 정보 조회 (DB에서)
@@ -266,9 +320,11 @@ def get_volunteer_meals():
     
     params = {
         'ServiceKey': '여기에_실제_서비스키_입력',  # 공공데이터 포털에서 발급받은 서비스 키
-        'SchCateGu': 'prormSj',
-        'keyword': keyword,
-        'schSign1': '3000000',
+        'numOfRows':100,
+        'pageNo': 1,
+        #'SchCateGu': 'prormSj',
+        #'keyword': keyword,
+        #'schSign1': '3000000',
         'schprogrmBgnde': start_date,
         'progrmEndde': end_date
     }
@@ -552,6 +608,7 @@ def delete_comment(post_id, comment_id):
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
 print("내용", flush=True)
+
 
     
 
