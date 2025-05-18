@@ -1,3 +1,4 @@
+
 import json
 from psycopg2 import pool
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -88,7 +89,7 @@ class Database:
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM "app_user" WHERE email = %s', (email,))
         if cursor.fetchone():
-            return {"error": "Email already exists"}, 400  # ✅ 이걸로 충분
+            return {"error": "Email already exists"}, 400  #  이걸로 충분
 
         try:
         # 비밀번호를 해시화된 값으로 삽입
@@ -110,7 +111,7 @@ class Database:
         if not user:
             return {"error": "User not found"}, 404
         
-        stored_password_hash = user[3]  # assuming the password is at index 2
+        stored_password_hash = user[3]  
         
         # 비밀번호 확인 추가된 부분
         if check_password_hash(stored_password_hash, entered_password):  # 비밀번호 확인
@@ -139,7 +140,7 @@ class Database:
         return result
     
     @query_decorator
-    def insert_volunteer_info(self, conn, progrmRegistNo, prgramSj, actBeginDe, actEndDe, actPlace):
+    def insert_volunteer_info(self, conn, progrmRegistNo, progrmSj, actBeginDe, actEndDe, actPlace):
         cursor = conn.cursor()
         
         # 이미 해당 프로그램 등록 번호가 DB에 있는지 확인
@@ -149,10 +150,10 @@ class Database:
 
         # 봉사활동 정보 DB에 삽입
         sql = """
-        INSERT INTO volunteer_info (progrmRegistNo, prgramSj, actBeginDe, actEndDe, actPlace)
+        INSERT INTO volunteer_info (progrmRegistNo, progrmSj, actBeginDe, actEndDe, actPlace)
         VALUES (%s, %s, %s, %s, %s)
         """
-        cursor.execute(sql, (progrmRegistNo, prgramSj, actBeginDe, actEndDe, actPlace))
+        cursor.execute(sql, (progrmRegistNo, progrmSj, actBeginDe, actEndDe, actPlace))
         conn.commit()
 
         return {"message": "봉사활동 정보가 성공적으로 저장되었습니다."}, 201
@@ -169,7 +170,7 @@ class Database:
 
         return {
             "progrmRegistNo": row[1],
-            "prgramSj": row[2],
+            "progrmSj": row[2],
             "actBeginDe": row[3],
             "actEndDe": row[4],
             "actPlace": row[5]
@@ -397,8 +398,68 @@ class Database:
 
         except Exception as e:
             # 로그인 확인 중 예외 발생 시 에러 반환
-            return {"error": f"비밀번호 확인 오류: {str(e)}"}, 500 
+            return {"error": f"비밀번호 확인 오류: {str(e)}"}, 500   
+        
+# 1365 데이터에서 봉사 신청 정보 저장 
+    @query_decorator
+    def insert_volunteer_application(self, conn, user_id, progrm_regist_no):
+        cursor = conn.cursor()
 
+    # 이미 신청한 봉사활동인지 확인
+        cursor.execute("""
+        SELECT * FROM volunteer_1365_applications
+        WHERE user_id = %s AND progrm_regist_no = %s
+    """, (user_id, progrm_regist_no))
+        if cursor.fetchone():
+            return {"error": "이미 신청한 봉사활동입니다."}, 400
+
+    # 봉사 신청 정보 저장
+        cursor.execute("""
+        INSERT INTO volunteer_1365_applications (user_id, progrm_regist_no,applied_at, status)
+        VALUES (%s, %s, NOW(), '신청완료')
+    """, (user_id, progrm_regist_no))
+        conn.commit()
+
+        return {"message": "봉사 신청이 완료되었습니다."}, 201
+    
+    # 웹 관리자의 봉사 등록 함수
+    @query_decorator
+    def insert_volunteer_post(self, conn, title, description, location, date):
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO volunteer_posts (title, description, location, date)
+        VALUES (%s, %s, %s, %s)
+    """, (title, description, location, date))
+        conn.commit()
+        cursor.close()
+        return {"message": "봉사 공고가 등록되었습니다."}, 201
+    
+    # 사용자의 웹에 대한 봉사 조회 함수 
+    @query_decorator
+    def get_all_volunteer_posts(self, conn):
+        cursor = conn.cursor()
+        cursor.execute("""
+        SELECT id, title, description, location, date, created_at
+        FROM volunteer_posts
+        ORDER BY date ASC
+        """)
+        rows = cursor.fetchall()
+        cursor.close()
+        columns = [desc[0] for desc in cursor.description]
+        result = [dict(zip(columns, row)) for row in rows]
+        return result
+    
+    # 커스텀 봉사 신청용 함수 
+    @query_decorator
+    def insert_custom_volunteer_application(self, conn, user_id, post_id):
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO custom_volunteer_applications (user_id, post_id)
+        VALUES (%s, %s)
+        """, (user_id, post_id))
+        conn.commit()
+        cursor.close()
+        return {"message": "봉사 신청이 완료되었습니다."}, 201
     
     
 
