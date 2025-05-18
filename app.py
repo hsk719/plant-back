@@ -12,6 +12,7 @@ import xmltodict #  XML을 JSON처럼 다루게 해줌
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask import jsonify
 import urllib.parse
+from datetime import datetime
 
 
 
@@ -59,16 +60,20 @@ logging.info("정보 메시지입니다.")
 @app.before_request
 def log_request_data():
     if request.method == 'GET':
-        return None
-    data = request.get_json()
-    print(f"Request data (from get_json): {data}")
-    print(f"Request data (raw): {request.data}")
-     # 비밀번호를 포함하여 전체 요청 데이터를 출력
-     
-@app.before_request
-def log_request_info():
-    logging.debug('Headers: %s', request.headers)
-    logging.debug('Body: %s', request.get_data())
+        return
+
+    try:
+        data = request.get_json()
+        masked_data = data.copy() if isinstance(data, dict) else {}
+
+        if 'password' in masked_data:
+            masked_data['password'] = '********'
+
+        logging.debug(f"요청 데이터 (마스킹): {masked_data}")
+        logging.debug(f"요청 헤더: {request.headers}")
+
+    except Exception as e:
+        logging.debug(f"요청 로깅 중 오류 발생: {e}")
 
 # 기본 경로 설정
 @app.route('/')
@@ -88,13 +93,23 @@ def get_users():
     users = db.test()
     return jsonify(users)
 
+# 비밀번호를 마스킹해서 로그에 출력하는 함수
+def log_request(data):
+    # 비밀번호를 마스킹
+    masked_data = data.copy()
+    if 'password' in masked_data:
+        masked_data['password'] = '********'
+        logger.debug(f"요청 데이터: {masked_data}")
+        
 
-# 사용자(user) 등록 라우트 (POST 요청)
+# 사용자(user) 로그인 라우트 (POST 요청)
 @app.route('/login', methods=['POST'])
 def login():
     try:
-        # 요청 데이터 받기
+        # 클라이언트로부터 전달된 JSON 데이터 가져오기
         data = request.get_json()
+        log_request(data)
+        # 로그인 처리 로직.
         email = data.get('email')
         password = data.get('password')
         
@@ -115,9 +130,9 @@ def login():
         if isinstance(user, list):
             user = user[0]
             
-        print(f"DB에 저장된 해시: {user['password']}")
-        print(f"입력된 비밀번호: {password}")
-        print(f"비교 결과: {check_password_hash(user['password'], password)}")
+        logger.debug(f"user 타입: {type(user)}")
+        logger.debug("비밀번호 검증 결과: 일치" if check_password_hash(user['password'], password) else "불일치")
+        # 절대로 입력된 평문 비밀번호는 출력x
 
         # 비밀번호 비교: 비밀번호가 일치하지 않으면 오류 반환
         if not check_password_hash(user['password'], password):
@@ -128,7 +143,7 @@ def login():
         return jsonify({'access_token': access_token}), 200  # JWT 토큰 반환
     
     except Exception as e:
-        print(f"Error during login: {e}")
+        logger.exception("회원가입 중 예외 발생")
         return jsonify({'error': '로그인 처리 중 오류가 발생했습니다.'}), 500
     
 
@@ -145,6 +160,7 @@ def register():
 
         # 필수 입력값 확인
         if not email or not password:
+            logging.warning("회원가입 실패 - 이메일 또는 비밀번호 누락")
             return jsonify({'error': '이메일과 비밀번호가 필요합니다.'}), 400
 
         # 이메일, 비밀번호 길이 제한
@@ -152,14 +168,17 @@ def register():
         MAX_PASSWORD_LENGTH = 120
 
         if len(email) > MAX_EMAIL_LENGTH:
+            logging.warning("회원가입 실패 - 이메일 길이 초과")
             return jsonify({"error": f"이메일은 {MAX_EMAIL_LENGTH}자 이하로 입력해주세요."}), 400
 
         if len(password) > MAX_PASSWORD_LENGTH:
+            logging.warning("회원가입 실패 - 비밀번호 길이 초과")
             return jsonify({"error": f"비밀번호는 {MAX_PASSWORD_LENGTH}자 이하로 입력해주세요."}), 400
 
         # 이미 존재하는 사용자 확인
         existing_user = db.get_user(email)
         if existing_user:
+            logging.warning(f"회원가입 실패 - 이미 존재하는 이메일: {email}")
             return jsonify({'error': '이미 등록된 이메일입니다.'}), 409
 
         # 비밀번호 해싱
@@ -173,12 +192,14 @@ def register():
         result, status_code = db.register_user(email, hashed_password)
 
         if status_code == 201:
+            logging.info(f"회원가입 성공 - 이메일: {email}")
             return jsonify({"message": "회원가입이 완료되었습니다."}), 201
         else:
+            logging.error(f"회원가입 실패 - DB 처리 실패, 이메일: {email}")
             return jsonify(result), status_code
 
     except Exception as e:
-        print(f"회원가입 중 오류 발생: {e}")
+        logging.exception(f"회원가입 처리 중 예외 발생 - 이메일: {data.get('email') if data else '알 수 없음'}")
         return jsonify({'error': '회원가입 처리 중 오류가 발생했습니다.'}), 500
     
 # 관리자(admin) 회원가입
@@ -223,20 +244,25 @@ def admin_login():
         password = data.get('password')
 
         if not email or not username or not password:
+            logging.warning("관리자 로그인 실패 - 필수 입력값 누락")
             return jsonify({'error': '이메일과 비밀번호가 필요합니다.'}), 400
 
         admin, status_code = db.get_admin(email)
         if status_code != 200:
+            logging.warning(f"관리자 로그인 실패 - 존재하지 않는 관리자: {email}")
             return jsonify({'error': '관리자를 찾을 수 없습니다.'}), 401
 
         if not check_password_hash(admin['password'], password):
+            logging.warning(f"관리자 로그인 실패 - 비밀번호 불일치: {email}")
             return jsonify({'error': '비밀번호가 일치하지 않습니다.'}), 401
 
         access_token = create_access_token(identity=email)
+        logging.info(f"관리자 로그인 성공: {email}")
         return jsonify({'access_token': access_token}), 200
 
     except Exception as e:
         print(f"관리자 로그인 오류: {e}")
+        logging.exception(f"관리자 로그인 예외 발생 - 이메일: {email if 'email' in locals() else '알 수 없음'}")
         return jsonify({'error': '로그인 처리 중 오류가 발생했습니다.'}), 500
 
 
@@ -312,79 +338,97 @@ def delete_account():
 # 1365 api (검색하여 봉사참여정보목록조회)
 @app.route('/volunteer/meals', methods=['GET'])
 def get_volunteer_meals():
-    # API 요청 파라미터 설정
-    
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
-    keyword = request.args.get('keyword')
-    
+    keyword = request.args.get('keyword')  # 현재는 사용하지 않지만 필요시 params에 추가 가능
+
     params = {
-        'ServiceKey': '여기에_실제_서비스키_입력',  # 공공데이터 포털에서 발급받은 서비스 키
-        'numOfRows':100,
+        'ServiceKey': '여기에_실제_서비스키_입력',
+        'numOfRows': 100,
         'pageNo': 1,
-        #'SchCateGu': 'prormSj',
-        #'keyword': keyword,
-        #'schSign1': '3000000',
         'schprogrmBgnde': start_date,
         'progrmEndde': end_date
     }
-    
+
     url = 'http://openapi.1365.go.kr/openapi/service/rest/VolunteerPartcptnService/getVltrSearchWordList'
 
-    
-    
     try:
         headers = {
             'Accept': 'application/xml',
             'Content-Type': 'application/xml'
         }
-        # API 호출
+
         response = requests.get(url, params=params, headers=headers)
-        
-        # 디버깅을 위한 출력
+
         print("Status Code:", response.status_code)
         print("Response Content:", response.content.decode('utf-8'))
-        
-        # 응답 상태 코드 확인
+
         if response.status_code != 200:
-            return jsonify({
-                'error': f'API 요청 실패: {response.status_code}',
-                'content': response.content.decode('utf-8')
-            }), response.status_code
-            
-        # XML 응답을 딕셔너리로 변환
+            return jsonify({'error': f'API 요청 실패: {response.status_code}'}), response.status_code
+
         dict_data = xmltodict.parse(response.content)
-        
-        # 응답 구조 확인
+
         if 'response' not in dict_data:
-            return jsonify({
-                'error': 'Invalid response format',
-                'content': dict_data
-            }), 500
-            
-        # 결과 데이터 추출 및 정제
+            return jsonify({'error': 'Invalid response format'}), 500
+
+        items = []
+        if dict_data['response']['body'].get('items'):
+            raw_items = dict_data['response']['body']['items'].get('item', [])
+            if isinstance(raw_items, dict):
+                raw_items = [raw_items]
+
+            for item in raw_items:
+                progrmRegistNo = item.get('progrmRegistNo') #프로그램 파라미터
+                progrmSj = item.get('progrmSj') #실제 봉사 제목 
+                actBeginDe = item.get('progrmBgnde') # 실제 활동 시작일
+                actEndDe = item.get('progrmEndde') # 실제 활동 종료일
+                actPlace = item.get('actPlace') # 실제 활동 장소 
+
+                # 필수 값 체크
+                if not all([progrmRegistNo, progrmSj, actBeginDe, actEndDe, actPlace]):
+                    print(f"❌ 스킵됨 - 누락된 값 있음: {item}")
+                    continue
+
+                # 날짜 파싱
+                try:
+                    actBeginDe = datetime.strptime(actBeginDe, "%Y%m%d").date()
+                    actEndDe = datetime.strptime(actEndDe, "%Y%m%d").date()
+                except Exception as e:
+                    print(f"❌ 날짜 파싱 실패: {e}, 데이터: {item}")
+                    continue
+
+                # DB 저장 시도
+                db.insert_volunteer_info(
+                    progrmRegistNo,
+                    progrmSj,
+                    actBeginDe,
+                    actEndDe,
+                    actPlace
+                )
+
+                items.append({
+                    'progrmRegistNo': progrmRegistNo,
+                    'progrmSj': progrmSj,
+                    'actBeginDe': actBeginDe.strftime("%Y-%m-%d"),
+                    'actEndDe': actEndDe.strftime("%Y-%m-%d"),
+                    'actPlace': actPlace
+                })
+
         result = {
             'status': dict_data['response']['header']['resultMsg'],
-            'total_count': dict_data['response']['body']['totalCount'],
-            'items': []
+            'total_count': dict_data['response']['body'].get('totalCount', 0),
+            'items': items
         }
-        
-        # items 데이터가 있는 경우에만 처리
-        if dict_data['response']['body'].get('items'):
-            items = dict_data['response']['body']['items'].get('item', [])
-            # 단일 항목인 경우 리스트로 변환
-            if isinstance(items, dict):
-                items = [items]
-            result['items'] = items
-        
-        return jsonify(result, 200, {'Content-Type':'application/json'})
-    
+
+        return jsonify(result), 200
+
     except requests.exceptions.RequestException as e:
         return jsonify({'error': f'Request failed: {str(e)}'}), 500
     except xmltodict.expat.ExpatError as e:
         return jsonify({'error': f'XML parsing failed: {str(e)}'}), 500
     except Exception as e:
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+
     
     
 #1365 api(기간별 봉사 참여 정보 목록 조회)
@@ -501,6 +545,66 @@ def call_volunteer_api(url, params):
         return jsonify({'error': f'XML parsing failed: {str(e)}'}), 500
     except Exception as e:
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
+    
+    
+# 1365 api 봉사신청(1365에서 가져온 봉사공고에서 봉사신청하는 api)
+@app.route('/volunteer/1365/apply', methods=['POST'])
+def apply_1365_volunteer():
+    data = request.get_json()
+    user_id = data.get('user_id')
+    progrmRegistNo = data.get('progrmRegistNo')  # 1365의 공고 ID
+
+    db.insert_volunteer_application(user_id, progrmRegistNo)
+
+    return jsonify({'message': '1365 봉사 신청 완료'})
+
+
+#커스텀 봉사 / 1365와 분리 
+
+# 관리자: 봉사 공고 등록 API
+@app.route('/admin/volunteer', methods=['POST'])
+def create_volunteer_post():
+    data = request.get_json()
+
+    title = data.get('title')
+    description = data.get('description')
+    location = data.get('location')
+    date = data.get('date')  # 'YYYY-MM-DD' 형식
+
+    if not all([title, description, date]):
+        return jsonify({'error': '필수 항목 누락'}), 400
+
+    try:
+        db.insert_volunteer_post(title, description, location, date)
+        return jsonify({'message': '공고 등록 완료'}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+
+# 사용자: 봉사 공고 목록 조회 API
+@app.route('/volunteer/custom-list', methods=['GET'])
+def get_custom_volunteer_posts():
+    try:
+        posts = db.get_all_volunteer_posts()
+        return jsonify(posts), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+# 커스텀 봉사 봉사신청(관리자가 등록한 봉사를 신청)  
+@app.route('/volunteer/custom-apply', methods=['POST'])
+def apply_custom_volunteer():
+    try:
+        data = request.get_json()
+        user_id = data['user_id']
+        post_id = data['post_id']
+
+        result = db.insert_custom_volunteer_application(user_id, post_id)
+        return jsonify(result[0]), result[1]
+
+    except KeyError:
+        return jsonify({'error': 'user_id 또는 post_id가 누락됨'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
     
 # 게시판 관련 API
@@ -608,7 +712,6 @@ def delete_comment(post_id, comment_id):
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
 print("내용", flush=True)
-
 
     
 
