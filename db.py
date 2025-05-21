@@ -1,4 +1,3 @@
-
 import json
 from psycopg2 import pool
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -16,7 +15,7 @@ class Database:
             config = env_json[env]
             
         if not config:
-            raise ValueError(f"❌ 환경(env) '{env}'는 유효하지 않습니다.")
+            raise ValueError(f" 환경(env) '{env}'는 유효하지 않습니다.")
         
         # 공통 키로 접근
         host = config['host']
@@ -25,7 +24,7 @@ class Database:
         password = config['password']
         dbname = config['dbname']
         
-        print(f"✅ DB 연결: {host}")  # 디버깅용 출력
+        print(f" DB 연결: {host}")  # 디버깅용 출력
            
 
         self.pool = pool.ThreadedConnectionPool(
@@ -89,7 +88,7 @@ class Database:
         cursor = conn.cursor()
         cursor.execute('SELECT * FROM "app_user" WHERE email = %s', (email,))
         if cursor.fetchone():
-            return {"error": "Email already exists"}, 400  #  이걸로 충분
+            return {"error": "Email already exists"}, 400  #  
 
         try:
         # 비밀번호를 해시화된 값으로 삽입
@@ -111,7 +110,7 @@ class Database:
         if not user:
             return {"error": "User not found"}, 404
         
-        stored_password_hash = user[3]  
+        stored_password_hash = user[3]  # assuming the password is at index 2
         
         # 비밀번호 확인 추가된 부분
         if check_password_hash(stored_password_hash, entered_password):  # 비밀번호 확인
@@ -140,7 +139,7 @@ class Database:
         return result
     
     @query_decorator
-    def insert_volunteer_info(self, conn, progrmRegistNo, progrmSj, actBeginDe, actEndDe, actPlace):
+    def insert_volunteer_info(self, conn, progrmRegistNo, prgramSj, actBeginDe, actEndDe, actPlace):
         cursor = conn.cursor()
         
         # 이미 해당 프로그램 등록 번호가 DB에 있는지 확인
@@ -150,10 +149,10 @@ class Database:
 
         # 봉사활동 정보 DB에 삽입
         sql = """
-        INSERT INTO volunteer_info (progrmRegistNo, progrmSj, actBeginDe, actEndDe, actPlace)
+        INSERT INTO volunteer_info (progrmRegistNo, prgramSj, actBeginDe, actEndDe, actPlace)
         VALUES (%s, %s, %s, %s, %s)
         """
-        cursor.execute(sql, (progrmRegistNo, progrmSj, actBeginDe, actEndDe, actPlace))
+        cursor.execute(sql, (progrmRegistNo, prgramSj, actBeginDe, actEndDe, actPlace))
         conn.commit()
 
         return {"message": "봉사활동 정보가 성공적으로 저장되었습니다."}, 201
@@ -170,7 +169,7 @@ class Database:
 
         return {
             "progrmRegistNo": row[1],
-            "progrmSj": row[2],
+            "prgramSj": row[2],
             "actBeginDe": row[3],
             "actEndDe": row[4],
             "actPlace": row[5]
@@ -199,6 +198,23 @@ class Database:
             "content": row[2],
             "author_email": row[3],
             "created_at": row[4].strftime('%Y-%m-%d %H:%M')
+            })
+        return result
+
+    # 특정 사용자가 작성한 게시물 목록 조회
+    @query_decorator
+    def get_user_posts(self, conn, author_email):
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM board_post WHERE author_email = %s ORDER BY created_at DESC', (author_email,))
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "id": row[0],
+                "title": row[1],
+                "content": row[2],
+                "author_email": row[3],
+                "created_at": row[4].strftime('%Y-%m-%d %H:%M')
             })
         return result
 
@@ -398,9 +414,8 @@ class Database:
 
         except Exception as e:
             # 로그인 확인 중 예외 발생 시 에러 반환
-            return {"error": f"비밀번호 확인 오류: {str(e)}"}, 500   
-        
-# 1365 데이터에서 봉사 신청 정보 저장 
+            return {"error": f"비밀번호 확인 오류: {str(e)}"}, 500
+        # 1365 데이터에서 봉사 신청 정보 저장 
     @query_decorator
     def insert_volunteer_application(self, conn, user_id, progrm_regist_no):
         cursor = conn.cursor()
@@ -460,6 +475,119 @@ class Database:
         conn.commit()
         cursor.close()
         return {"message": "봉사 신청이 완료되었습니다."}, 201
+    
+    #관리자용 목록 조회 함수
+    @query_decorator
+    def get_all_custom_volunteer_posts(conn):
+        with conn.cursor() as cur:
+            cur.execute("""
+            SELECT id, title, description, location, date, created_at
+            FROM custom_volunteer_posts
+            ORDER BY created_at DESC;
+        """)
+        rows = cur.fetchall()
+        return [
+            {
+                'id': row[0],
+                'title': row[1],
+                'description': row[2],
+                'location': row[3],
+                'date': row[4],
+                'created_at': row[5]
+            }
+            for row in rows
+        ]
+        
+    # 공고 수정 함수   
+    @query_decorator
+    def update_volunteer_posts(conn, post_id, title, description, location, date):
+        with conn.cursor() as cur:
+            cur.execute("""
+            UPDATE volunteer_posts
+            SET title = %s,
+                description = %s,
+                location = %s,
+                date = %s,
+                updated_at = NOW()
+            WHERE id = %s;
+        """, (title, description, location, date, post_id))
+            
+    #공고 삭제 함수
+    @query_decorator
+    def delete_volunteer_posts(conn, post_id):
+        with conn.cursor() as cur:
+        # 먼저 외래키 제약이 있는 경우 하위 테이블(예: 신청 테이블)부터 삭제 필요
+            cur.execute("""
+            DELETE FROM volunteer_posts
+            WHERE post_id = %s;
+        """, (post_id,))
+        
+        # 그런 다음 공고 자체 삭제
+        cur.execute("""
+            DELETE FROM volunteer_posts
+            WHERE id = %s;
+        """, (post_id,))
+
+    @query_decorator
+    def save_verification_code(self, conn, email, code):
+        cursor = conn.cursor()
+        # upsert: 이미 있으면 update, 없으면 insert
+        cursor.execute("""
+            INSERT INTO email_verification (email, code)
+            VALUES (%s, %s)
+            ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, created_at = NOW()
+        """, (email, code))
+        conn.commit()
+        return {"message": "Verification code saved"}, 200
+
+    @query_decorator
+    def verify_code_and_activate_user(self, conn, email, code):
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT code FROM email_verification WHERE email = %s
+        """, (email,))
+        row = cursor.fetchone()
+        if not row or row[0] != code:
+            return {"error": "Invalid or expired code"}, 400
+
+        # 인증 성공 → 사용자 인증 완료 처리
+        cursor.execute("""
+            UPDATE app_user SET is_verified = TRUE WHERE email = %s
+        """, (email,))
+        conn.commit()
+        return {"message": "Email verified successfully"}, 200
+
+    @query_decorator
+    def save_reset_code(self, conn, email, code):
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO password_reset (email, code)
+            VALUES (%s, %s)
+            ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, created_at = NOW()
+        """, (email, code))
+        conn.commit()
+        return {"message": "Reset code saved"}, 200
+
+    @query_decorator
+    def reset_password(self, conn, email, code, new_hashed_password):
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT code FROM password_reset WHERE email = %s
+        """, (email,))
+        row = cursor.fetchone()
+        if not row or row[0] != code:
+            return {"error": "Invalid or expired reset code"}, 400
+
+        cursor.execute("""
+            UPDATE app_user SET password = %s WHERE email = %s
+        """, (new_hashed_password, email))
+        conn.commit()
+        return {"message": "Password reset successful"}, 200
+    
+    @query_decorator
+    def raw_query(self, conn, cursor, sql, params=None):
+        cursor.execute(sql, params)
+        return cursor.fetchall()
     
     
 
