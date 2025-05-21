@@ -3,6 +3,7 @@ logging.basicConfig(level=logging.DEBUG)
 from flask import Flask, request, jsonify,send_from_directory
 from flask_jwt_extended import JWTManager, create_access_token
 import os
+import json
 from flask_cors import CORS
 from db import Database  # db.py에서 Database 클래스를 임포트
 from werkzeug.security import check_password_hash
@@ -13,7 +14,21 @@ from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask import jsonify
 import urllib.parse
 from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
+from itsdangerous import URLSafeTimedSerializer
+from itsdangerous import SignatureExpired, BadSignature
+from flask_jwt_extended import get_jwt_identity
+from functools import wraps
+from flask_jwt_extended import verify_jwt_in_request
 
+# 환경 설정 파일 불러오기
+with open('env.json', 'r') as f:
+    env_config = json.load(f)
+    
+# 현재 환경 설정 (prod 또는 local)
+ENV = "prod"
+SERVICE_KEY = env_config[ENV]['volunteer_service_key']  # 1365 API 서비스 키
 
 
 # 로깅 설정
@@ -25,6 +40,9 @@ logger.setLevel(logging.DEBUG)
 app = Flask(__name__)
 CORS(app, origins="*")  # 모든 도메인에서 접근 가능하게 설정
 app.logger.setLevel(logging.DEBUG)
+
+# 임시로 메모리에 인증코드 저장
+verification_codes = {}
 
 # 비밀번호 해시화
 hashed_password = generate_password_hash("my_secure_password")
@@ -46,12 +64,63 @@ def verify_password(plain_password, hashed_password):
 # 환경 변수로부터 설정 읽어오기
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'default_secret_key')
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'default_jwt_secret_key')
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 465
+app.config['MAIL_USERNAME'] = 'gkstjdrb719@gmail.com'
+app.config['MAIL_PASSWORD'] = 'ixwj wpus rkip jove'  # 위에서 생성한 앱 비밀번호
+app.config['MAIL_USE_TLS'] = False
+app.config['MAIL_USE_SSL'] = True
 
 # Flask-JWT 설정
 jwt = JWTManager(app)
 
 # DB 인스턴스 (local)
 db = Database("prod")  
+
+serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
+
+#이메일 인증 환경변수 
+def send_email(to_email, subject, html_content):
+    msg = MIMEText(html_content, "html")
+    msg["Subject"] = subject
+    msg["From"] = app.config['MAIL_USERNAME']
+    msg["To"] = to_email
+    
+    try:
+        with smtplib.SMTP_SSL(app.config['MAIL_SERVER'], app.config['MAIL_PORT']) as smtp:
+            smtp.login(app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
+            smtp.send_message(msg)
+        logger.debug(f"메일 전송 성공: {to_email}")
+    except Exception as e:
+        logger.error(f"메일 전송 실패: {e}")
+        
+# get_current_user() 구현       
+def get_current_user():
+    email = get_jwt_identity()
+    if not email:
+        return None
+    admin_list = db.raw_query("SELECT * FROM admins WHERE email = %s", (email,))
+    if not admin_list:
+        return None
+    admin = admin_list[0]
+    # admin은 list의 첫 번째 row (튜플 등)일 수 있으니 dict 변환을 원하면 아래 참고
+    return {
+        "email": admin[1],  # 인덱스 조정 필요 시 수정
+        "is_confirmed": admin[3]
+    }
+# @admin_required 데코레이터 정의   
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        try:
+            verify_jwt_in_request()  # JWT 유효성 검사
+            user = get_current_user()
+            if not user:
+                return jsonify({"msg": "인증된 관리자가 아닙니다."}), 403
+            return f(*args, **kwargs)
+        except Exception as e:
+            return jsonify({"msg": "JWT 인증 실패", "error": str(e)}), 401
+    return decorated_function
 
 # flask 내부 print/log도 gunicorn 로그에 잘 보임
 logging.debug("디버깅 메시지입니다.")
@@ -74,6 +143,11 @@ def log_request_data():
 
     except Exception as e:
         logging.debug(f"요청 로깅 중 오류 발생: {e}")
+     
+@app.before_request
+def log_request_info():
+    logging.debug('Headers: %s', request.headers)
+    logging.debug('Body: %s', request.get_data())
 
 # 기본 경로 설정
 @app.route('/')
@@ -101,14 +175,20 @@ def log_request(data):
         masked_data['password'] = '********'
         logger.debug(f"요청 데이터: {masked_data}")
         
+# 함수 정의: 로그 기록용 data 인자를 받도록 함수 정의 수정
+def log_request_data(data=None):
+    if data is None:
+        data = request.get_json()
+    app.logger.debug(f"Body: {data}")
 
+        
 # 사용자(user) 로그인 라우트 (POST 요청)
 @app.route('/login', methods=['POST'])
 def login():
     try:
         # 클라이언트로부터 전달된 JSON 데이터 가져오기
         data = request.get_json()
-        log_request(data)
+        log_request_data(data)
         # 로그인 처리 로직.
         email = data.get('email')
         password = data.get('password')
@@ -148,7 +228,6 @@ def login():
     
 
     
-    
 # 사용자(user) 등록 (회원가입) 라우트
 @app.route('/register', methods=['POST'])
 def register():
@@ -160,7 +239,6 @@ def register():
 
         # 필수 입력값 확인
         if not email or not password:
-            logging.warning("회원가입 실패 - 이메일 또는 비밀번호 누락")
             return jsonify({'error': '이메일과 비밀번호가 필요합니다.'}), 400
 
         # 이메일, 비밀번호 길이 제한
@@ -168,17 +246,14 @@ def register():
         MAX_PASSWORD_LENGTH = 120
 
         if len(email) > MAX_EMAIL_LENGTH:
-            logging.warning("회원가입 실패 - 이메일 길이 초과")
             return jsonify({"error": f"이메일은 {MAX_EMAIL_LENGTH}자 이하로 입력해주세요."}), 400
 
         if len(password) > MAX_PASSWORD_LENGTH:
-            logging.warning("회원가입 실패 - 비밀번호 길이 초과")
             return jsonify({"error": f"비밀번호는 {MAX_PASSWORD_LENGTH}자 이하로 입력해주세요."}), 400
 
         # 이미 존재하는 사용자 확인
         existing_user = db.get_user(email)
         if existing_user:
-            logging.warning(f"회원가입 실패 - 이미 존재하는 이메일: {email}")
             return jsonify({'error': '이미 등록된 이메일입니다.'}), 409
 
         # 비밀번호 해싱
@@ -192,78 +267,120 @@ def register():
         result, status_code = db.register_user(email, hashed_password)
 
         if status_code == 201:
-            logging.info(f"회원가입 성공 - 이메일: {email}")
             return jsonify({"message": "회원가입이 완료되었습니다."}), 201
         else:
-            logging.error(f"회원가입 실패 - DB 처리 실패, 이메일: {email}")
             return jsonify(result), status_code
 
     except Exception as e:
-        logging.exception(f"회원가입 처리 중 예외 발생 - 이메일: {data.get('email') if data else '알 수 없음'}")
+        print(f"회원가입 중 오류 발생: {e}")
         return jsonify({'error': '회원가입 처리 중 오류가 발생했습니다.'}), 500
     
-# 관리자(admin) 회원가입
-@app.route('/admin/register', methods=['POST'])
-def admin_register():
+# 관리자 회원가입(이메일 인증)
+@app.route('/admin/signup', methods=['POST'])
+def admin_signup():
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
+    
+    # 이메일 중복 체크
+    existing_admin = db.raw_query("SELECT * FROM admins WHERE email = %s", (email,))
+    if existing_admin:
+        return jsonify({"msg": "이미 가입된 이메일입니다."}), 400
+    
+    # 이메일 인증용 토큰 생성
+    token = serializer.dumps(email, salt='email-confirm')
+    # 토큰 로그 찍기 (서버 콘솔에 출력)
+    import logging
+    logging.debug(f"생성된 토큰: {token}")
+    print("생성된 토큰:", token)  # print도 추가 가능
+    
+    confirm_url = f"{request.host_url}admin/confirm/{token}"
+    html = f"<p>아래 링크를 클릭하여 이메일 인증을 완료하세요.</p><a href='{confirm_url}'>이메일 인증하기</a>"
+    send_email(email, "관리자 이메일 인증", html)
+    
+    # 이메일 본문 HTML 로그 찍기
+    print("이메일 본문 HTML:", html)
+    
+    send_email(email, "관리자 이메일 인증", html)
+    # 임시로 비밀번호 해시 저장 또는 별도 컬럼에 저장 후 인증 시 업데이트 처리 가능 (여기선 임시 저장)
+    hashed_pw = generate_password_hash(password)
+    db.execute_query("INSERT INTO admins (email, password, is_confirmed) VALUES (%s, %s, %s)", (email, hashed_pw, False))
+
+    return jsonify({"msg": "인증 이메일을 발송했습니다.", "token": token}), 200
+
+ # 관리자 이메일 토큰발급                   
+@app.route('/admin/confirm/<token>', methods=['GET'])
+def confirm_email(token):
     try:
-        data = request.get_json()
-        email = data.get('email')
-        username = data.get('username')
-        password = data.get('password')
+        email = serializer.loads(token, salt='email-confirm', max_age=3600)
+    except SignatureExpired:
+        return jsonify({"msg": "토큰이 만료되었습니다."}), 400
+    except BadSignature:
+        return jsonify({"msg": "토큰이 잘못되었습니다."}), 400
 
-        if not email or not username or not password:
-            return jsonify({'error': '이메일, 사용자명, 비밀번호가 모두 필요합니다.'}), 400
-        
-        # 관리자 이메일 중복 여부 체크
-        existing_admin, status_code = db.get_admin(email)
-        if status_code == 200:
-            return jsonify({'error': '이미 등록된 이메일입니다.'}), 409
-        elif status_code != 404:
-            return jsonify(existing_admin), status_code  # 조회 실패 (예외 처리 등)
+    # 인증 완료 처리 (예: is_confirmed 컬럼 True로 업데이트)
+    db.execute_query("UPDATE admins SET is_confirmed = %s WHERE email = %s", (True, email))
 
-        hashed_password = generate_password_hash(password, method='scrypt')
-        result, status_code = db.register_admin(email, username, hashed_password)
-        
-        print(f"등록 결과: {result}")  # 디버깅 로그
-        if status_code == 201:
-            return jsonify({"message": "관리자 등록 완료"}), 201
-        else:
-            return jsonify(result), status_code
+    return "이메일 인증이 완료되었습니다. 로그인 해주세요.", 200
 
-    except Exception as e:
-        print(f"관리자 회원가입 오류: {e}")
-        return jsonify({'error': '회원가입 처리 중 오류가 발생했습니다.'}), 500
-    
-# 관리자(admin) 로그인
+#관리자 비밀번호 찾기 api
+@app.route('/admin/forgot', methods=['POST'])
+def forgot_password():
+    data = request.get_json()
+    email = data.get('email')
+
+    admin = db.execute_query("SELECT * FROM admins WHERE email = %s", (email,))
+    if not admin:
+        return jsonify({"msg": "등록된 이메일이 없습니다."}), 404
+
+    token = serializer.dumps(email, salt='password-recover')
+    reset_url = f"{request.host_url}admin/reset/{token}"
+    # 토큰 출력 
+    app.logger.debug(f"비밀번호 재설정 링크: {reset_url}")
+    html = f"<p>비밀번호를 재설정하려면 아래 링크를 클릭하세요.</p><a href='{reset_url}'>비밀번호 재설정</a>"
+    send_email(email, "비밀번호 재설정 안내", html)
+
+    return jsonify({"msg": "비밀번호 재설정 이메일을 발송했습니다."}), 200
+
+#관리자 비밀번호 토큰발급 api 
+@app.route('/admin/reset/<token>', methods=['POST'])
+def reset_password(token):
+    try:
+        email = serializer.loads(token, salt='password-recover', max_age=3600)
+    except Exception:
+        return jsonify({"msg": "토큰이 만료되었거나 잘못되었습니다."}), 400
+
+    data = request.get_json()
+    new_password = data.get('password')
+    hashed_pw = generate_password_hash(new_password)
+
+    db.execute_query("UPDATE admins SET password = %s WHERE email = %s", (hashed_pw, email))
+
+    return jsonify({"msg": "비밀번호가 성공적으로 변경되었습니다."}), 200
+
+#관리자 로그인 
 @app.route('/admin/login', methods=['POST'])
 def admin_login():
-    try:
-        data = request.get_json()
-        email = data.get('email')
-        username = data.get('username')
-        password = data.get('password')
+    data = request.get_json()
+    email = data.get('email')
+    password = data.get('password')
 
-        if not email or not username or not password:
-            logging.warning("관리자 로그인 실패 - 필수 입력값 누락")
-            return jsonify({'error': '이메일과 비밀번호가 필요합니다.'}), 400
+    admin_list = db.raw_query("SELECT * FROM admins WHERE email = %s", (email,))
+    if not admin_list:
+        return jsonify({"msg": "이메일이 존재하지 않습니다."}), 404
 
-        admin, status_code = db.get_admin(email)
-        if status_code != 200:
-            logging.warning(f"관리자 로그인 실패 - 존재하지 않는 관리자: {email}")
-            return jsonify({'error': '관리자를 찾을 수 없습니다.'}), 401
+    admin = admin_list[0]
+    hashed_password = admin[2]  # index 맞추세요
+    is_confirmed = admin[3]
 
-        if not check_password_hash(admin['password'], password):
-            logging.warning(f"관리자 로그인 실패 - 비밀번호 불일치: {email}")
-            return jsonify({'error': '비밀번호가 일치하지 않습니다.'}), 401
+    if not check_password_hash(hashed_password, password):
+        return jsonify({"msg": "비밀번호가 일치하지 않습니다."}), 401
 
-        access_token = create_access_token(identity=email)
-        logging.info(f"관리자 로그인 성공: {email}")
-        return jsonify({'access_token': access_token}), 200
+    if not is_confirmed:
+        return jsonify({"msg": "이메일 인증이 완료되지 않았습니다."}), 403
 
-    except Exception as e:
-        print(f"관리자 로그인 오류: {e}")
-        logging.exception(f"관리자 로그인 예외 발생 - 이메일: {email if 'email' in locals() else '알 수 없음'}")
-        return jsonify({'error': '로그인 처리 중 오류가 발생했습니다.'}), 500
+    access_token = create_access_token(identity=email)
+    return jsonify({"access_token": access_token}), 200
 
 
     
@@ -338,108 +455,262 @@ def delete_account():
 # 1365 api (검색하여 봉사참여정보목록조회)
 @app.route('/volunteer/meals', methods=['GET'])
 def get_volunteer_meals():
+    # API 요청 파라미터 설정
+    
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
-    keyword = request.args.get('keyword')  # 현재는 사용하지 않지만 필요시 params에 추가 가능
-
+    keyword = request.args.get('keyword')
+    sido = request.args.get('sido', None)  # 시도명 파라미터 추가
+    
+    # 키워드에서 지역명 추출 시도 (sido 파라미터가 없을 경우)
+    region_keywords = ['서울', '서울특별시', '부산', '부산광역시', '대구', '대구광역시', 
+                      '인천', '인천광역시', '광주', '광주광역시', '대전', '대전광역시', 
+                      '울산', '울산광역시', '세종', '세종특별자치시', '경기', '경기도', 
+                      '강원', '강원도', '충북', '충청북도', '충남', '충청남도', 
+                      '전북', '전라북도', '전남', '전라남도', '경북', '경상북도', 
+                      '경남', '경상남도', '제주', '제주특별자치도',
+                      '동두천', '고양', '성남', '수원', '안양', '부천', '안산', '고양시', '성남시', '수원시']
+    
+    extracted_sido = None
+    search_keyword = keyword
+    
+    if sido is None and keyword:
+        for region in region_keywords:
+            if region in keyword:
+                if region == '서울' or region == '서울특별시':
+                    extracted_sido = '서울특별시'
+                elif region == '부산' or region == '부산광역시':
+                    extracted_sido = '부산광역시'
+                elif region == '대구' or region == '대구광역시':
+                    extracted_sido = '대구광역시'
+                elif region == '인천' or region == '인천광역시':
+                    extracted_sido = '인천광역시'
+                elif region == '광주' or region == '광주광역시':
+                    extracted_sido = '광주광역시'
+                elif region == '대전' or region == '대전광역시':
+                    extracted_sido = '대전광역시'
+                elif region == '울산' or region == '울산광역시':
+                    extracted_sido = '울산광역시'
+                elif region == '세종' or region == '세종특별자치시':
+                    extracted_sido = '세종특별자치시'
+                elif region == '경기' or region == '경기도' or region in ['동두천', '고양', '성남', '수원', '안양', '부천', '안산', '고양시', '성남시', '수원시']:
+                    extracted_sido = '경기도'
+                elif region == '강원' or region == '강원도':
+                    extracted_sido = '강원도'
+                elif region == '충북' or region == '충청북도':
+                    extracted_sido = '충청북도'
+                elif region == '충남' or region == '충청남도':
+                    extracted_sido = '충청남도'
+                elif region == '전북' or region == '전라북도':
+                    extracted_sido = '전라북도'
+                elif region == '전남' or region == '전라남도':
+                    extracted_sido = '전라남도'
+                elif region == '경북' or region == '경상북도':
+                    extracted_sido = '경상북도'
+                elif region == '경남' or region == '경상남도':
+                    extracted_sido = '경상남도'
+                elif region == '제주' or region == '제주특별자치도':
+                    extracted_sido = '제주특별자치도'
+                
+                # 검색어에서 지역명 제거 (선택사항)
+                search_keyword = keyword.replace(region, '').strip()
+                break
+    
+    # sido 파라미터가 제공된 경우 그것을 사용, 아니면 추출된 값 사용, 둘 다 없으면 전체 지역 검색
+    final_sido = sido or extracted_sido
+    
+    # 공식 API 문서에 맞게 파라미터 이름 수정
     params = {
-        'ServiceKey': '여기에_실제_서비스키_입력',
+        'ServiceKey': SERVICE_KEY,  # env.json에서 가져온 서비스 키 사용
         'numOfRows': 100,
         'pageNo': 1,
-        'schprogrmBgnde': start_date,
-        'progrmEndde': end_date
+        'progrmSj': search_keyword if extracted_sido else keyword,  # 키워드 검색 파라미터
+        'progrmBgnde': start_date,  # 시작일
+        'progrmEndde': end_date,  # 종료일
+        'srvcClCode': '',  # 봉사분야
     }
-
+    
+    # 지역 필터링이 있는 경우에만 추가
+    if final_sido:
+        params['sidoNm'] = final_sido
+    
+    print(f"1365 API 요청 파라미터: {params}")
+    
     url = 'http://openapi.1365.go.kr/openapi/service/rest/VolunteerPartcptnService/getVltrSearchWordList'
-
+    
     try:
         headers = {
             'Accept': 'application/xml',
             'Content-Type': 'application/xml'
         }
-
+        # API 호출
         response = requests.get(url, params=params, headers=headers)
-
+        
+        # 디버깅을 위한 출력
         print("Status Code:", response.status_code)
-        print("Response Content:", response.content.decode('utf-8'))
-
+        print("Response Content 일부:", response.content.decode('utf-8')[:1000])  # 응답 내용 일부만 출력
+        
+        # 응답 상태 코드 확인
         if response.status_code != 200:
-            return jsonify({'error': f'API 요청 실패: {response.status_code}'}), response.status_code
-
+            return jsonify({
+                'status': f'API 호출 실패: {response.status_code}',
+                'total_count': '0',
+                'items': []
+            }), 200
+            
+        # XML 응답을 딕셔너리로 변환
         dict_data = xmltodict.parse(response.content)
-
+        
+        # 응답 구조 확인
         if 'response' not in dict_data:
-            return jsonify({'error': 'Invalid response format'}), 500
-
-        items = []
-        if dict_data['response']['body'].get('items'):
-            raw_items = dict_data['response']['body']['items'].get('item', [])
-            if isinstance(raw_items, dict):
-                raw_items = [raw_items]
-
-            for item in raw_items:
-                progrmRegistNo = item.get('progrmRegistNo') #프로그램 파라미터
-                progrmSj = item.get('progrmSj') #실제 봉사 제목 
-                actBeginDe = item.get('progrmBgnde') # 실제 활동 시작일
-                actEndDe = item.get('progrmEndde') # 실제 활동 종료일
-                actPlace = item.get('actPlace') # 실제 활동 장소 
-
-                # 필수 값 체크
-                if not all([progrmRegistNo, progrmSj, actBeginDe, actEndDe, actPlace]):
-                    print(f"❌ 스킵됨 - 누락된 값 있음: {item}")
-                    continue
-
-                # 날짜 파싱
-                try:
-                    actBeginDe = datetime.strptime(actBeginDe, "%Y%m%d").date()
-                    actEndDe = datetime.strptime(actEndDe, "%Y%m%d").date()
-                except Exception as e:
-                    print(f"❌ 날짜 파싱 실패: {e}, 데이터: {item}")
-                    continue
-
-                # DB 저장 시도
-                db.insert_volunteer_info(
-                    progrmRegistNo,
-                    progrmSj,
-                    actBeginDe,
-                    actEndDe,
-                    actPlace
-                )
-
-                items.append({
-                    'progrmRegistNo': progrmRegistNo,
-                    'progrmSj': progrmSj,
-                    'actBeginDe': actBeginDe.strftime("%Y-%m-%d"),
-                    'actEndDe': actEndDe.strftime("%Y-%m-%d"),
-                    'actPlace': actPlace
-                })
-
+            return jsonify({
+                'status': '잘못된 응답 형식',
+                'total_count': '0',
+                'items': []
+            }), 200
+            
+        # 결과 데이터 추출 및 정제
         result = {
             'status': dict_data['response']['header']['resultMsg'],
-            'total_count': dict_data['response']['body'].get('totalCount', 0),
-            'items': items
+            'total_count': dict_data['response']['body']['totalCount'],
+            'items': []
         }
-
+        
+        # items 데이터가 있는 경우에만 처리
+        if dict_data['response']['body'].get('items'):
+            items = dict_data['response']['body']['items'].get('item', [])
+            # 단일 항목인 경우 리스트로 변환
+            if isinstance(items, dict):
+                items = [items]
+                
+            # 디버깅: 각 아이템의 제목과 지역 정보 출력
+            print("=== 검색 결과 항목 디버깅 ===")
+            for idx, item in enumerate(items[:5]):  # 처음 5개 항목만 출력
+                print(f"항목 {idx+1}:")
+                print(f"  제목(prgramSj): {item.get('prgramSj', '제목 없음')}")
+                print(f"  장소(actPlace): {item.get('actPlace', '장소 정보 없음')}")
+                print(f"  기관(nanmmbyNm): {item.get('nanmmbyNm', '기관 정보 없음')}")
+                print(f"  시도명(sidoNm): {item.get('sidoNm', '지역 정보 없음')}")
+                
+                # API 응답에서 모든 키 값 확인 (첫번째 항목만)
+                if idx == 0:
+                    print("  항목의 모든 키:")
+                    for key in item.keys():
+                        print(f"    {key}: {item.get(key, '')}")
+                        
+            # 필드가 누락되었을 때 기본값을 제공하도록 각 항목 처리
+            processed_items = []
+            for item in items:
+                # API 응답에서 필드명이 다를 수 있으므로 대체 필드 확인
+                if 'prgramSj' not in item:
+                    # 가능한 대체 필드명 확인 (API 문서 참조)
+                    if 'progrmSj' in item:
+                        item['prgramSj'] = item['progrmSj']
+                    elif 'pgmNm' in item:
+                        item['prgramSj'] = item['pgmNm']
+                    elif 'title' in item:
+                        item['prgramSj'] = item['title']
+                    else:
+                        item['prgramSj'] = '제목 정보 없음'
+                
+                # 필수 필드에 기본값 제공
+                item_with_defaults = {
+                    'progrmRegistNo': item.get('progrmRegistNo', ''),
+                    'prgramSj': item.get('prgramSj', '제목 정보 없음'),
+                    'actBeginDe': item.get('actBeginDe', ''),
+                    'actEndDe': item.get('actEndDe', ''),
+                    'actPlace': item.get('actPlace', '장소 정보 없음'),
+                    'progrmSttusSe': item.get('progrmSttusSe', '상태 미정'),
+                    'nanmmbyNm': item.get('nanmmbyNm', '기관 정보 없음'),
+                    'sidoNm': item.get('sidoNm', ''),
+                    'gugunNm': item.get('gugunNm', ''),
+                    'rcritNmpr': item.get('rcritNmpr', '0'),
+                    'actWkdy': item.get('actWkdy', ''),
+                    'actTime': item.get('actTime', ''),
+                    'telno': item.get('telno', ''),
+                }
+                
+                # 연락처 정보 처리: telno가 없으면 다른 가능한 필드 확인
+                if not item_with_defaults['telno'] or item_with_defaults['telno'] == '':
+                    if 'nanmmbyNmAdmnTelno' in item and item['nanmmbyNmAdmnTelno']:
+                        item_with_defaults['telno'] = item['nanmmbyNmAdmnTelno']
+                    elif 'admNmtel' in item and item['admNmtel']:
+                        item_with_defaults['telno'] = item['admNmtel']
+                    elif 'tel' in item and item['tel']:
+                        item_with_defaults['telno'] = item['tel']
+                        
+                # 모집인원 정보 처리: rcritNmpr가 없으면 다른 가능한 필드 확인
+                if not item_with_defaults['rcritNmpr'] or item_with_defaults['rcritNmpr'] == '0' or item_with_defaults['rcritNmpr'] == '':
+                    if 'recruitNmpr' in item and item['recruitNmpr']:
+                        item_with_defaults['rcritNmpr'] = item['recruitNmpr']
+                    elif 'recruitNum' in item and item['recruitNum']:
+                        item_with_defaults['rcritNmpr'] = item['recruitNum']
+                        
+                # 활동 요일 및 시간 정보 처리
+                if not item_with_defaults['actWkdy'] or item_with_defaults['actWkdy'] == '':
+                    if 'actDay' in item and item['actDay']:
+                        item_with_defaults['actWkdy'] = item['actDay']
+                        
+                if not item_with_defaults['actTime'] or item_with_defaults['actTime'] == '':
+                    if 'actHour' in item and item['actHour']:
+                        item_with_defaults['actTime'] = item['actHour']
+                        
+                # 원본 항목에서 누락된 필드 추가
+                for key, value in item.items():
+                    if key not in item_with_defaults:
+                        item_with_defaults[key] = value
+                
+                processed_items.append(item_with_defaults)
+                
+            # 검색어에 지역명이 있고 응답에서 다른 지역의 결과가 포함된 경우 추가 필터링
+            if final_sido:
+                filtered_items = []
+                for item in processed_items:
+                    # sidoNm 필드가 있고 검색한 지역과 일치하는지 확인
+                    item_sido = item.get('sidoNm', '')
+                    # 지역명이 없거나 검색한 지역과 일치하면 포함
+                    if not item_sido or final_sido in item_sido:
+                        filtered_items.append(item)
+                        
+                print(f"지역 필터링 전 결과 수: {len(processed_items)}")
+                print(f"지역 필터링 후 결과 수: {len(filtered_items)}")
+                result['items'] = filtered_items
+            else:
+                result['items'] = processed_items
+        
         return jsonify(result), 200
-
-    except requests.exceptions.RequestException as e:
-        return jsonify({'error': f'Request failed: {str(e)}'}), 500
-    except xmltodict.expat.ExpatError as e:
-        return jsonify({'error': f'XML parsing failed: {str(e)}'}), 500
-    except Exception as e:
-        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
-
     
+    except requests.exceptions.RequestException as e:
+        print(f"요청 실패: {str(e)}")
+        return jsonify({
+            'status': f'API 요청 실패: {str(e)}',
+            'total_count': '0',
+            'items': []
+        }), 200
+    except xmltodict.expat.ExpatError as e:
+        print(f"XML 파싱 실패: {str(e)}")
+        return jsonify({
+            'status': f'XML 파싱 실패: {str(e)}',
+            'total_count': '0',
+            'items': []
+        }), 200
+    except Exception as e:
+        print(f"예상치 못한 오류: {str(e)}")
+        return jsonify({
+            'status': f'예상치 못한 오류: {str(e)}',
+            'total_count': '0',
+            'items': []
+        }), 200
+
     
 #1365 api(기간별 봉사 참여 정보 목록 조회)
 @app.route('/volunteer/period', methods=['GET'])
 def get_volunteer_period():
-    service_key = '여기에_서비스키_입력'
     start_date = request.args.get('start_date')  # 예: 20250101
     end_date = request.args.get('end_date')      # 예: 20250131
 
     params = {
-        'ServiceKey': service_key,
+        'ServiceKey': SERVICE_KEY,
         'schprogrmBgnde': start_date,
         'progrmEndde': end_date,
         'numOfRows': 10,
@@ -452,12 +723,11 @@ def get_volunteer_period():
 #1365 api(지역별 봉사 참여 정보 목록 조회)
 @app.route('/volunteer/area', methods=['GET'])
 def get_volunteer_area():
-    service_key = '여기에_서비스키_입력'
     sido = request.args.get('sido')  # 예: 서울특별시
     gugun = request.args.get('gugun')  # 예: 강남구
 
     params = {
-        'ServiceKey': service_key,
+        'ServiceKey': SERVICE_KEY,
         'schSign1': sido,
         'schSign2': gugun,
         'numOfRows': 10,
@@ -471,11 +741,10 @@ def get_volunteer_area():
 # 1365 api(분야별 봉사 참여 정보 목록 조회)
 @app.route('/volunteer/category', methods=['GET'])
 def get_volunteer_category():
-    service_key = '여기에_서비스키_입력'
     category = request.args.get('category')  # 예: 환경정화
 
     params = {
-        'ServiceKey': service_key,
+        'ServiceKey': SERVICE_KEY,
         'schCateGu': category,
         'numOfRows': 10,
         'pageNo': 1
@@ -488,11 +757,10 @@ def get_volunteer_category():
 #1365 api (봉사 참여 정보 상세 조회)
 @app.route('/volunteer/detail', methods=['GET'])
 def get_volunteer_detail():
-    service_key = '여기에_서비스키_입력'
     progrmRegistNo = request.args.get('progrmRegistNo')  # 고유 프로그램 ID
 
     params = {
-        'ServiceKey': service_key,
+        'ServiceKey': SERVICE_KEY,
         'progrmRegistNo': progrmRegistNo
     }
 
@@ -513,17 +781,19 @@ def call_volunteer_api(url, params):
 
         if response.status_code != 200:
             return jsonify({
-                'error': f'API 요청 실패: {response.status_code}',
-                'content': response.content.decode('utf-8')
-            }), response.status_code
+                'status': f'API 요청 실패: {response.status_code}',
+                'total_count': '0',
+                'items': []
+            }), 200
 
         dict_data = xmltodict.parse(response.content)
 
         if 'response' not in dict_data:
             return jsonify({
-                'error': 'Invalid response format',
-                'content': dict_data
-            }), 500
+                'status': '잘못된 응답 형식',
+                'total_count': '0',
+                'items': []
+            }), 200
 
         result = {
             'status': dict_data['response']['header']['resultMsg'],
@@ -537,31 +807,30 @@ def call_volunteer_api(url, params):
                 items = [items]
             result['items'] = items
 
-        return jsonify(result, 200, {'Content-Type': 'application/json'})
+        return jsonify(result), 200
 
     except requests.exceptions.RequestException as e:
-        return jsonify({'error': f'Request failed: {str(e)}'}), 500
+        return jsonify({
+            'status': f'API 요청 실패: {str(e)}',
+            'total_count': '0',
+            'items': []
+        }), 200
     except xmltodict.expat.ExpatError as e:
-        return jsonify({'error': f'XML parsing failed: {str(e)}'}), 500
+        return jsonify({
+            'status': f'XML 파싱 실패: {str(e)}',
+            'total_count': '0',
+            'items': []
+        }), 200
     except Exception as e:
-        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
-    
-    
-# 1365 api 봉사신청(1365에서 가져온 봉사공고에서 봉사신청하는 api)
-@app.route('/volunteer/1365/apply', methods=['POST'])
-def apply_1365_volunteer():
-    data = request.get_json()
-    user_id = data.get('user_id')
-    progrmRegistNo = data.get('progrmRegistNo')  # 1365의 공고 ID
+        return jsonify({
+            'status': f'예상치 못한 오류: {str(e)}',
+            'total_count': '0',
+            'items': []
+        }), 200
+        
+        #커스텀 봉사 / 1365와 분리 
 
-    db.insert_volunteer_application(user_id, progrmRegistNo)
-
-    return jsonify({'message': '1365 봉사 신청 완료'})
-
-
-#커스텀 봉사 / 1365와 분리 
-
-# 관리자: 봉사 공고 등록 API
+# 관리자 전용: 봉사 공고 등록 API
 @app.route('/admin/volunteer', methods=['POST'])
 def create_volunteer_post():
     data = request.get_json()
@@ -577,6 +846,45 @@ def create_volunteer_post():
     try:
         db.insert_volunteer_post(title, description, location, date)
         return jsonify({'message': '공고 등록 완료'}), 201
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    
+# 관리자 전용 : 모든 봉사 공고 목록 조회 API    
+@app.route('/admin/volunteer/list', methods=['GET'])
+def get_all_volunteer_posts_admin():
+    try:
+        posts = db.get_all_volunteer_posts()  # 사용자와 동일하거나 관리자 전용 메서드
+        return jsonify({'posts': posts}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    
+# 관리자 전용 : 봉사 공고 수정 API     
+@app.route('/admin/volunteer/<int:post_id>', methods=['PUT'])
+def update_volunteer_posts(post_id):
+    data = request.get_json()
+    try:
+        title = data.get('title')
+        description = data.get('description')
+        location = data.get('location')
+        date = data.get('date')
+
+        if not all([title, description, date]):
+            return jsonify({'error': '필수 항목 누락'}), 400
+
+        db.update_volunteer_posts(post_id, title, description, location, date)
+        return jsonify({'message': '공고 수정 완료'}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+    
+ # 관리자 전용 : 봉사 공고 삭제 API
+@app.route('/admin/volunteer/<int:post_id>', methods=['DELETE'])
+def delete_volunteer_posts(post_id):
+    try:
+        db.delete_volunteer_posts(post_id)
+        return jsonify({'message': '공고 삭제 완료'}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     
@@ -624,7 +932,28 @@ def create_post():
 # 글 목록 조회
 @app.route('/posts', methods=['GET'])
 def get_posts():
+    author_email = request.args.get('author_email')
+    
+    # 특정 사용자의 게시물을 요청하는 경우
+    if author_email:
+        posts = db.get_user_posts(author_email)
+        print(f"사용자 게시물 요청: {author_email}, 결과: {len(posts)}개")
+        return jsonify(posts)
+    
+    # 전체 게시물 목록을 요청하는 경우
     posts = db.get_all_posts()
+    return jsonify(posts)
+
+# 특정 사용자가 작성한 게시물 목록 조회 (별도 엔드포인트)
+@app.route('/posts/user', methods=['GET'])
+def get_user_posts():
+    author_email = request.args.get('author_email')
+    
+    if not author_email:
+        return jsonify({"error": "사용자 이메일이 필요합니다."}), 400
+    
+    posts = db.get_user_posts(author_email)
+    print(f"사용자 게시물 요청: {author_email}, 결과: {len(posts)}개")
     return jsonify(posts)
 
 # 글 상세
