@@ -4,6 +4,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 from datetime import datetime
 import os
+
 # Database 클래스 정의
 class Database:
     def __init__(self, env):
@@ -11,29 +12,29 @@ class Database:
         with open('./env.json') as env_file:
             env_json = json.load(env_file)
 
-             # 선택한 환경에 맞는 config 설정
-            config = env_json[env]
-            
-        if not config:
+            # 선택한 환경에 맞는 config 설정
+        self.config = env_json.get(env)   
+
+        if not self.config:
             raise ValueError(f" 환경(env) '{env}'는 유효하지 않습니다.")
         
         # 공통 키로 접근
-        host = config['host']
-        port = config.get('port', 5432)
-        user = config['user']
-        password = config['password']
-        dbname = config['dbname']
+        host = self.config['host']
+        port = self.config.get('port', 5432)
+        user = self.config['user']
+        password = self.config['password']
+        dbname = self.config['dbname']
         
         print(f" DB 연결: {host}")  # 디버깅용 출력
            
-
         self.pool = pool.ThreadedConnectionPool(
             1,
             10,
-            user=config['user'],
-            password=config['password'],
+            user=user,
+            password=password,
             host=host,
-            database=config['dbname']
+            database=dbname,
+            port=port
         )
 
     def _strftime(self, dt):
@@ -584,11 +585,216 @@ class Database:
         conn.commit()
         return {"message": "Password reset successful"}, 200
     
+# 인덱스로 접근하기 튜플 --> 단점: 컬럼 순서 바뀌면 문제 생길 수 있음.
     @query_decorator
-    def raw_query(self, conn, cursor, sql, params=None):
+    def raw_query(self, conn, sql, params=None):
+        cursor = conn.cursor()
         cursor.execute(sql, params)
         return cursor.fetchall()
     
+# 이 부분 때문에 오류 생겼음 (웹관리자 로그인 함수)
+    @query_decorator
+    def execute(self, conn, sql, params=None):
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        conn.commit()
+        return {"message": "Query executed"}, 200
+    
+# 1. 관리자 인증 신청 함수
+    @query_decorator
+    def register_admin_verification(self, conn, user_id: int, center_name: str, position: str):
+        cursor = conn.cursor()
+
+        # 중복 신청 방지
+        cursor.execute("""
+        SELECT id FROM admin_verification_requests 
+        WHERE user_id = %s AND status = '대기중'
+        """, (user_id,))
+        existing = cursor.fetchone()
+        if existing:
+            return {"message": "이미 대기 중인 인증 요청이 존재합니다."}, 400
+
+    # 인증 신청 등록
+        cursor.execute("""
+        INSERT INTO admin_verification_requests (user_id, center_name, position)
+        VALUES (%s, %s, %s)
+        RETURNING id, requested_at
+        """, (user_id, center_name, position))
+        result = cursor.fetchone()
+        conn.commit()  # <--- 반드시 커밋 해주기 이걸 해줘야 db데이터가 저장됨 
+
+        return {
+        "message": "관리자 인증 요청이 성공적으로 등록되었습니다.",
+        "request_id": result[0],
+        "requested_at": result[1].isoformat()
+        }, 201
+        
+     #2 관리자 인증상태 조회 
+    @query_decorator
+    def get_admin_verification_status(self, conn, user_id):
+        cursor = conn.cursor()
+
+        cursor.execute("""
+        SELECT id, center_name, position, status, requested_at, reviewed_at
+        FROM admin_verification_requests
+        WHERE user_id = %s
+        ORDER BY requested_at DESC
+        LIMIT 1
+        """, (user_id,))
+        result = cursor.fetchone()
+        conn.commit()
+
+        if not result:
+            return {"message": "관리자 인증 신청 내역이 없습니다."}, 404
+
+        return {
+        "request_id": result[0],   # id
+        "center_name": result[1],  # center_name
+        "position": result[2],     # position
+        "status": result[3],       # status
+        "requested_at": result[4].isoformat() if result[4] else None,
+        "reviewed_at": result[5].isoformat() if result[5] else None
+    }, 200
+        
+    #3. 관리자 인증 신청 취소 함수 
+    @query_decorator
+    def cancel_admin_verification(self, conn, user_id: int):
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, status
+            FROM admin_verification_requests
+            WHERE user_id = %s AND status = '대기중'
+            LIMIT 1
+        """, (user_id,))
+        existing_request = cursor.fetchone()
+
+        if not existing_request:
+            return {"message": "대기 중인 인증 신청이 없습니다."}, 404
+
+        cursor.execute("""
+            UPDATE admin_verification_requests
+            SET status = '취소됨'
+            WHERE id = %s
+        """, (existing_request[0],))
+        conn.commit()
+
+        return {"message": "관리자 인증 신청이 취소되었습니다."}, 200
+
+    # 4. 승인/반려 
+    @query_decorator
+    def update_verification_status(self, conn, request_id, action, reason=None):
+        cursor = conn.cursor()
+        # 현재 상태 확인
+        cursor.execute("SELECT status FROM admin_verification_requests WHERE id = %s", (request_id,))
+        result = cursor.fetchone()
+
+        if not result or result[0] != 'pending':
+            return False  # 존재하지 않거나 이미 처리됨
+
+        new_status = 'approved' if action == 'approve' else 'rejected'
+
+        cursor.execute("""
+            UPDATE admin_verification_requests
+            SET status = %s, reviewed_at = NOW()
+            WHERE id = %s
+        """, (new_status, request_id))
+        
+
+    # 5. 신청자 목록 조회
+    @query_decorator
+    def get_applicants_by_post(conn, post_id):
+        with conn.cursor() as cur:
+            cur.execute("""
+            SELECT u.id, u.name, a.status, a.applied_at
+            FROM volunteer_applications a
+            JOIN users u ON a.user_id = u.id
+            WHERE a.post_id = %s
+            ORDER BY a.applied_at DESC;
+        """, (post_id,))
+        rows = cur.fetchall()
+        return [
+            {'user_id': r[0], 'name': r[1], 'status': r[2], 'applied_at': r[3]}
+            for r in rows
+        ]
+    
+    # 6. 신청 수락 / 반려
+    @query_decorator
+    def update_application_status(conn, post_id, user_id, action):
+        with conn.cursor() as cur:
+            cur.execute("""
+            UPDATE volunteer_applications
+            SET status = %s
+            WHERE post_id = %s AND user_id = %s;
+        """, (action, post_id, user_id))
+        return {"message": f"{action} 처리 완료"}
+    
+
+    # 봉사 실적 처리 API
+    # 7. 수락된 사용자 목록
+    @query_decorator
+    def get_approved_users(conn, post_id):
+        with conn.cursor() as cur:
+            cur.execute("""
+            SELECT u.id, u.name, a.applied_at
+            FROM volunteer_applications a
+            JOIN users u ON a.user_id = u.id
+            WHERE a.post_id = %s AND a.status = 'approve';
+        """, (post_id,))
+        rows = cur.fetchall()
+        return [{'user_id': r[0], 'name': r[1], 'applied_at': r[2]} for r in rows]
+    
+
+    # 8,9.  실적 등록 승인/반려
+    @query_decorator
+    def update_volunteer_record(conn, post_id, user_id, status):
+        with conn.cursor() as cur:
+            cur.execute("""
+            UPDATE volunteer_records
+            SET status = %s, updated_at = NOW()
+            WHERE post_id = %s AND user_id = %s;
+        """, (status, post_id, user_id))
+        return {"message": f"실적 {status} 처리 완료"}
+    
+
+    #10. 수요처 실적 현황 목록 조회 (관리자)
+    @query_decorator
+    def get_stats(self, conn, cursor, status=None, start_date=None, end_date=None, center_name=None):
+        query = """
+        SELECT center_name, status, COUNT(*) AS count, SUM(hours) AS total_hours
+        FROM volunteer_performance
+        WHERE 1=1
+        """
+        params = []
+
+        if status is not None:
+            query += " AND status = %s"
+        params.append(status)
+        if start_date is not None:
+            query += " AND performed_at >= %s"
+        params.append(start_date)
+        if end_date is not None:
+            query += " AND performed_at <= %s"
+        params.append(end_date)
+        if center_name is not None:
+            query += " AND center_name ILIKE %s"
+        params.append(f"%{center_name}%")
+
+        query += " GROUP BY center_name, status ORDER BY center_name"
+
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        conn.commit()
+
+        result = []
+        for row in rows:
+            result.append({
+            "center_name": row[0],
+            "status": row[1],
+            "count": row[2],
+            "total_hours": float(row[3]) if row[3] is not None else 0
+        })
+
+        return result
     
 
 
