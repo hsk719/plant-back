@@ -1,3 +1,4 @@
+
 import logging
 logging.basicConfig(level=logging.DEBUG)
 from flask import Flask, request, jsonify,send_from_directory
@@ -304,7 +305,7 @@ def admin_signup():
     send_email(email, "관리자 이메일 인증", html)
     # 임시로 비밀번호 해시 저장 또는 별도 컬럼에 저장 후 인증 시 업데이트 처리 가능 (여기선 임시 저장)
     hashed_pw = generate_password_hash(password)
-    db.execute_query("INSERT INTO admins (email, password, is_confirmed) VALUES (%s, %s, %s)", (email, hashed_pw, False))
+    db.execute("INSERT INTO admins (email, password, is_confirmed) VALUES (%s, %s, %s)", (email, hashed_pw, False))
 
     return jsonify({"msg": "인증 이메일을 발송했습니다.", "token": token}), 200
 
@@ -319,7 +320,7 @@ def confirm_email(token):
         return jsonify({"msg": "토큰이 잘못되었습니다."}), 400
 
     # 인증 완료 처리 (예: is_confirmed 컬럼 True로 업데이트)
-    db.execute_query("UPDATE admins SET is_confirmed = %s WHERE email = %s", (True, email))
+    db.execute("UPDATE admins SET is_confirmed = %s WHERE email = %s", (True, email))
 
     return "이메일 인증이 완료되었습니다. 로그인 해주세요.", 200
 
@@ -329,7 +330,7 @@ def forgot_password():
     data = request.get_json()
     email = data.get('email')
 
-    admin = db.execute_query("SELECT * FROM admins WHERE email = %s", (email,))
+    admin = db.execute("SELECT * FROM admins WHERE email = %s", (email,))
     if not admin:
         return jsonify({"msg": "등록된 이메일이 없습니다."}), 404
 
@@ -354,7 +355,7 @@ def reset_password(token):
     new_password = data.get('password')
     hashed_pw = generate_password_hash(new_password)
 
-    db.execute_query("UPDATE admins SET password = %s WHERE email = %s", (hashed_pw, email))
+    db.execute("UPDATE admins SET password = %s WHERE email = %s", (hashed_pw, email))
 
     return jsonify({"msg": "비밀번호가 성공적으로 변경되었습니다."}), 200
 
@@ -450,6 +451,112 @@ def delete_account():
         return jsonify({"message": "회원탈퇴가 완료되었습니다."}), 200
     else:
         return jsonify({"error": "회원탈퇴에 실패했습니다."}), 500
+    
+#5월22일 최신화
+
+# 1. 관리자 인증 신청 api   
+@app.route('/verification/request', methods=['POST'])
+@jwt_required()
+def request_admin_verification_route():
+    data = request.get_json()
+    user_id = data.get("user_id")
+    center_name = data.get("center_name")
+    position = data.get("position")
+
+    if not user_id or not center_name or not position:
+        return {"error": "모든 필드를 입력해주세요."}, 400
+
+    return db.register_admin_verification(user_id=user_id, center_name=center_name, position=position)
+
+# 2. 관리자 인증 상태 조회 API
+@app.route('/verification/status', methods=['GET'])
+def check_admin_verification_status():
+    user_id = request.args.get("user_id", type=int)
+
+    if not user_id:
+        return {"error": "user_id를 query string으로 전달해주세요."}, 400
+
+    return db.get_admin_verification_status(user_id=user_id)
+
+# 3. 관리자 인증 신청 취소 API 
+@app.route('/verification/cancel', methods=['POST'])
+def cancel_admin_verification_request():
+    data = request.get_json()
+    user_id = data.get("user_id")
+
+    if not user_id:
+        return {"error": "user_id를 요청 바디에 포함시켜야 합니다."}, 400
+
+    return db.cancel_admin_verification(user_id=user_id)
+
+# 4.관리자 인증 승인/반려 처리
+@app.route('/admin/verification/<int:request_id>/approve_or_reject', methods=['POST'])
+@admin_required
+def handle_verification(request_id):
+    data = request.get_json()
+    action = data.get('action')
+    if action not in ['approve', 'reject']:
+        return {"msg": "Invalid action"}, 400
+    
+    # DB 업데이트 예시
+    success = db.update_verification_status(request_id=request_id, action=action, reason=data.get('reason'))
+    if not success:
+        return {"msg": "Request not found or already processed"}, 404
+    return {"msg": f"Verification {action}d"}, 200
+
+#봉사 신청자 관리 API
+
+# 5. 신청자 목록 조회
+@app.route('/admin/volunteer/<int:post_id>/applicants', methods=['GET'])
+@admin_required
+def get_applicants(post_id):
+    result = db.get_applicants_by_post(post_id)
+    return jsonify(result), 200
+
+# 6. 신청 수락 / 반려
+@app.route('/admin/volunteer/<int:post_id>/applicant/<int:user_id>/<string:action>', methods=['PUT'])
+@admin_required
+def handle_application(post_id, user_id, action):
+    if action not in ['approve', 'reject']:
+        return {"msg": "action은 approve 또는 reject여야 합니다."}, 400
+    result = db.update_application_status(post_id, user_id, action)
+    return jsonify(result), 200
+
+# 봉사 실적 처리 API
+# 7. 수락된 사용자 목록
+@app.route('/admin/volunteer/<int:post_id>/approved-users', methods=['GET'])
+@admin_required
+def get_approved_users(post_id):
+    result = db.get_approved_users(post_id)
+    return jsonify(result), 200
+    
+# 8. 실적 등록 승인
+@app.route('/admin/volunteer/<int:post_id>/user/<int:user_id>/record', methods=['PUT'])
+@admin_required
+def approve_record(post_id, user_id):
+    result = db.update_volunteer_record(post_id, user_id, 'approved')
+    return jsonify(result), 200
+
+# 9. 실적 등록 반려
+@app.route('/admin/volunteer/<int:post_id>/user/<int:user_id>/record/reject', methods=['PUT'])
+@admin_required
+def reject_record(post_id, user_id):
+    result = db.update_volunteer_record(post_id, user_id, 'rejected')
+    return jsonify(result), 200
+
+# 10. 수요처 실적 현황 목록 조회 (관리자)
+@app.route('/admin/stats', methods=['GET'])
+@admin_required
+def get_stats():
+    status = request.args.get('status')          # 예: 'approved', 'pending', 'rejected' 등
+    start_date = request.args.get('start_date')  # yyyy-mm-dd 형식
+    end_date = request.args.get('end_date')      # yyyy-mm-dd 형식
+    center_name = request.args.get('center_name')  # 센터명 검색용
+
+    result = db.get_stats(status=status, start_date=start_date, end_date=end_date, center_name=center_name)
+    return jsonify(result), 200
+    
+
     
 
 # 1365 api (검색하여 봉사참여정보목록조회)
@@ -828,7 +935,7 @@ def call_volunteer_api(url, params):
             'items': []
         }), 200
         
-        #커스텀 봉사 / 1365와 분리 
+#커스텀 봉사 / 1365와 분리 
 
 # 관리자 전용: 봉사 공고 등록 API
 @app.route('/admin/volunteer', methods=['POST'])
@@ -856,6 +963,17 @@ def get_all_volunteer_posts_admin():
     try:
         posts = db.get_all_volunteer_posts()  # 사용자와 동일하거나 관리자 전용 메서드
         return jsonify({'posts': posts}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# 관리자 전용 : 봉사 공고 상세 조회 API
+@app.route('/admin/volunteer/<int:post_id>', methods=['GET'])
+def get_volunteer_post_detail(post_id):
+    try:
+        post = db.get_volunteer_post_by_id(post_id)
+        if not post:
+            return jsonify({'error': '해당 공고를 찾을 수 없습니다.'}), 404
+        return jsonify(post), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     
@@ -1041,7 +1159,6 @@ def delete_comment(post_id, comment_id):
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
 print("내용", flush=True)
-
     
 
 
